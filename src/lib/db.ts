@@ -242,6 +242,31 @@ export async function storeImage(dataUrl: string, source: NonNullable<StoredImag
   return id
 }
 
+export async function storeImageWithId(id: string, dataUrl: string, source: NonNullable<StoredImage['source']> = 'upload'): Promise<string> {
+  const existing = await getImage(id)
+  if (existing) return id
+
+  const thumbnail = await safeCreateImageThumbnail(dataUrl)
+  await putImage({
+    id,
+    dataUrl,
+    createdAt: Date.now(),
+    source,
+    width: thumbnail.width,
+    height: thumbnail.height,
+  })
+  if (thumbnail.thumbnailDataUrl) {
+    await putImageThumbnail({
+      id,
+      thumbnailDataUrl: thumbnail.thumbnailDataUrl,
+      width: thumbnail.width,
+      height: thumbnail.height,
+      thumbnailVersion: THUMBNAIL_VERSION,
+    })
+  }
+  return id
+}
+
 function loadImage(dataUrl: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image()

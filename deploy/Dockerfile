@@ -6,6 +6,7 @@ WORKDIR /app
 ENV VITE_DEFAULT_API_URL=__VITE_DEFAULT_API_URL_PLACEHOLDER__
 ENV VITE_API_PROXY_AVAILABLE=__VITE_API_PROXY_AVAILABLE_PLACEHOLDER__
 ENV VITE_API_PROXY_LOCKED=__VITE_API_PROXY_LOCKED_PLACEHOLDER__
+ENV VITE_ASYNC_IMAGE_PROXY_AVAILABLE=__VITE_ASYNC_IMAGE_PROXY_AVAILABLE_PLACEHOLDER__
 ENV VITE_DOCKER_DEPLOYMENT=__VITE_DOCKER_DEPLOYMENT_PLACEHOLDER__
 ENV VITE_DOCKER_LEGACY_API_URL_USED=__VITE_DOCKER_LEGACY_API_URL_USED_PLACEHOLDER__
 
@@ -16,7 +17,7 @@ COPY . .
 RUN npm run build
 
 # ---- Production stage ----
-FROM nginx:alpine
+FROM node:20-alpine
 
 ENV HOST=0.0.0.0
 ENV PORT=80
@@ -24,12 +25,16 @@ ENV DEFAULT_API_URL=
 ENV API_PROXY_URL=
 ENV ENABLE_API_PROXY=false
 ENV LOCK_API_PROXY=false
+ENV ENABLE_ASYNC_IMAGE_PROXY=false
+ENV ASYNC_IMAGE_DIRECT_API_URL=
+ENV ASYNC_IMAGE_JOB_TTL_SECONDS=1800
+ENV ASYNC_IMAGE_UPSTREAM_TIMEOUT_SECONDS=900
 
-COPY --from=build /app/dist /usr/share/nginx/html
-COPY deploy/nginx.conf /etc/nginx/templates/default.conf.template
-COPY --chmod=755 deploy/migrate-api-env.envsh /docker-entrypoint.d/05-migrate-api-env.envsh
-COPY --chmod=755 deploy/inject-api-url.sh /docker-entrypoint.d/40-inject-api-url.sh
+WORKDIR /app
+
+COPY --from=build /app/dist /app/dist
+COPY deploy/server.mjs /app/server.mjs
 
 EXPOSE 80
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["node", "/app/server.mjs"]

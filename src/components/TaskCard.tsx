@@ -208,6 +208,8 @@ export default function TaskCard({
 
   const defaultModelForProvider = task.apiProvider === 'fal' ? DEFAULT_FAL_MODEL : DEFAULT_IMAGES_MODEL
   const showModel = task.apiModel && task.apiModel !== defaultModelForProvider
+  const outputCount = Math.max(task.outputImages?.length ?? 0, task.rawImageUrls?.length ?? 0)
+  const cardImageSrc = thumbSrc || task.rawImageUrls?.[0] || ''
 
   return (
     <div className="relative rounded-xl">
@@ -329,23 +331,31 @@ export default function TaskCard({
               </span>
             </div>
           )}
-          {task.status === 'done' && thumbSrc && (
+          {task.status === 'done' && cardImageSrc && (
             <>
               <img
-                src={thumbSrc}
+                src={cardImageSrc}
                 data-image-id={task.outputImages[0]}
                 className="saveable-image w-full h-full object-cover"
                 loading="lazy"
+                referrerPolicy="no-referrer"
+                onLoad={(event) => {
+                  const image = event.currentTarget
+                  if (!coverRatio && image.naturalWidth > 0 && image.naturalHeight > 0) {
+                    setCoverRatio(formatImageRatio(image.naturalWidth, image.naturalHeight))
+                    setCoverSize(`${image.naturalWidth}×${image.naturalHeight}`)
+                  }
+                }}
                 alt=""
               />
-              {task.outputImages.length > 1 && (
+              {outputCount > 1 && (
                 <span className="absolute bottom-1 right-1 bg-black/60 text-white text-xs px-1.5 py-0.5 rounded">
-                  {task.outputImages.length}
+                  {outputCount}
                 </span>
               )}
             </>
           )}
-          {task.status === 'done' && !thumbSrc && (
+          {task.status === 'done' && !cardImageSrc && (
             <svg
               className="w-8 h-8 text-gray-300"
               fill="none"

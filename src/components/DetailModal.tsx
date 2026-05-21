@@ -105,8 +105,13 @@ export default function DetailModal() {
     }
   }, [task])
 
-  const currentOutputImageId = task?.outputImages?.[imageIndex] || ''
-  const currentOutputPreviewSrc = currentOutputImageId ? outputPreviewSrcs[currentOutputImageId] || '' : ''
+  const outputImageIds = task?.outputImages ?? []
+  const rawImageUrls = task?.rawImageUrls ?? []
+  const outputLen = Math.max(outputImageIds.length, rawImageUrls.length)
+  const currentOutputImageId = outputImageIds[imageIndex] || ''
+  const currentRawImageUrl = currentOutputImageId ? '' : rawImageUrls[imageIndex] || ''
+  const currentOutputPreviewSrc = currentOutputImageId ? outputPreviewSrcs[currentOutputImageId] || '' : currentRawImageUrl
+  const currentOutputKey = currentOutputImageId || currentRawImageUrl
   const maskTargetId = task?.maskTargetImageId || null
   const maskTargetSrc = maskTargetId ? imageSrcs[maskTargetId] || '' : ''
   const maskSrc = task?.maskImageId ? imageSrcs[task.maskImageId] || '' : ''
@@ -177,10 +182,9 @@ export default function DetailModal() {
 
   if (!task) return null
 
-  const outputLen = task.outputImages?.length || 0
-  const currentImageRatio = currentOutputImageId ? imageRatios[currentOutputImageId] : ''
-  const currentImageSize = currentOutputImageId ? imageSizes[currentOutputImageId] : ''
-  const currentActualParams = currentOutputImageId ? task.actualParamsByImage?.[currentOutputImageId] : undefined
+  const currentImageRatio = currentOutputKey ? imageRatios[currentOutputKey] : ''
+  const currentImageSize = currentOutputKey ? imageSizes[currentOutputKey] : ''
+  const currentActualParams = currentOutputImageId ? task.actualParamsByImage?.[currentOutputImageId] : task.actualParams
   const currentRevisedPrompt = currentOutputImageId ? task.revisedPromptByImage?.[currentOutputImageId]?.trim() : ''
   const showRevisedPrompt = Boolean(currentRevisedPrompt && currentRevisedPrompt !== task.prompt.trim())
   const codexCliPromptKey = getCodexCliPromptKey(settings)
@@ -194,7 +198,6 @@ export default function DetailModal() {
   const showSourceInfo = Boolean(task.apiProvider || task.apiProfileName || task.apiModel)
   const isFalReconnecting = task.status === 'error' && task.falRecoverable
   const isCustomReconnecting = task.status === 'error' && task.customRecoverable
-  const rawImageUrls = task.rawImageUrls ?? []
 
   const formatTime = (ts: number | null) => {
     if (!ts) return ''
@@ -322,20 +325,21 @@ export default function DetailModal() {
                 ref={mainImageRef}
                 src={currentOutputPreviewSrc}
                 data-image-id={currentOutputImageId}
-                className="saveable-image max-w-[calc(100%-2rem)] max-h-[calc(100%-2rem)] object-contain cursor-pointer"
+                className={`saveable-image max-w-[calc(100%-2rem)] max-h-[calc(100%-2rem)] object-contain ${currentOutputImageId ? 'cursor-pointer' : ''}`}
+                referrerPolicy="no-referrer"
                 onLoad={() => {
                   const panel = imagePanelRef.current
                   const image = mainImageRef.current
                   if (!panel || !image) return
 
-                  if (currentOutputImageId && image.naturalWidth > 0 && image.naturalHeight > 0) {
+                  if (currentOutputKey && image.naturalWidth > 0 && image.naturalHeight > 0) {
                     setImageRatios((prev) => ({
                       ...prev,
-                      [currentOutputImageId]: formatImageRatio(image.naturalWidth, image.naturalHeight),
+                      [currentOutputKey]: formatImageRatio(image.naturalWidth, image.naturalHeight),
                     }))
                     setImageSizes((prev) => ({
                       ...prev,
-                      [currentOutputImageId]: `${image.naturalWidth}×${image.naturalHeight}`,
+                      [currentOutputKey]: `${image.naturalWidth}×${image.naturalHeight}`,
                     }))
                   }
 
@@ -343,9 +347,9 @@ export default function DetailModal() {
                   const imageRect = image.getBoundingClientRect()
                   setImageLabelLeft(Math.max(8, imageRect.left - panelRect.left))
                 }}
-                onClick={() =>
-                  setLightboxImageId(task.outputImages[imageIndex], task.outputImages)
-                }
+                onClick={() => {
+                  if (currentOutputImageId) setLightboxImageId(currentOutputImageId, task.outputImages)
+                }}
                 alt=""
               />
               <div data-selectable-text className="absolute top-[15px] flex items-center gap-1.5" style={{ left: imageLabelLeft }}>
@@ -695,7 +699,7 @@ export default function DetailModal() {
             </button>
             <button
               onClick={handleEdit}
-              disabled={!outputLen}
+              disabled={!task.outputImages?.length}
               className="col-span-2 sm:flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-green-50 dark:bg-green-500/10 text-green-600 dark:text-green-400 hover:bg-green-100 dark:hover:bg-green-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition text-sm font-medium whitespace-nowrap"
             >
               <EditIcon className="w-4 h-4 flex-shrink-0" />

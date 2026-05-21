@@ -29,6 +29,7 @@ import {
   deleteImage,
   clearImages,
   storeImage,
+  storeImageWithId,
 } from './lib/db'
 import { callImageApi } from './lib/api'
 import { IMAGE_FETCH_CORS_HINT } from './lib/imageApiShared'
@@ -264,7 +265,11 @@ function orderImagesWithMaskFirst(images: InputImage[], maskTargetImageId: strin
 }
 
 function countSuccessfulOutputImages(tasks: TaskRecord[]) {
-  return tasks.reduce((count, task) => count + (task.status === 'done' ? task.outputImages.length : 0), 0)
+  return tasks.reduce((count, task) => count + (task.status === 'done' ? getTaskOutputCount(task) : 0), 0)
+}
+
+function getTaskOutputCount(task: TaskRecord) {
+  return Math.max(task.outputImages.length, task.rawImageUrls?.length ?? 0)
 }
 
 function skipSupportPromptForImportedData(tasks: TaskRecord[]) {
@@ -297,7 +302,7 @@ function maybeOpenSupportPrompt(previousTasks: TaskRecord[], nextTasks: TaskReco
 
   const previousTask = previousTasks.find((task) => task.id === taskId)
   const nextTask = nextTasks.find((task) => task.id === taskId)
-  if (!nextTask || previousTask?.status === 'done' || nextTask.status !== 'done' || nextTask.outputImages.length === 0) return
+  if (!nextTask || previousTask?.status === 'done' || nextTask.status !== 'done' || getTaskOutputCount(nextTask) === 0) return
 
   const previousCount = countSuccessfulOutputImages(previousTasks)
   const nextCount = countSuccessfulOutputImages(nextTasks)
@@ -650,6 +655,31 @@ function genId(): string {
   return Date.now().toString(36) + (++uid).toString(36) + Math.random().toString(36).slice(2, 6)
 }
 
+function prepareGeneratedImageIds(dataUrls: string[]) {
+  return dataUrls.map((dataUrl) => {
+    const id = genId()
+    cacheImage(id, dataUrl)
+    return id
+  })
+}
+
+function persistGeneratedImages(taskId: string, outputIds: string[], dataUrls: string[]) {
+  if (!outputIds.length || !dataUrls.length) return
+
+  void (async () => {
+    for (let index = 0; index < outputIds.length; index++) {
+      const id = outputIds[index]
+      const dataUrl = dataUrls[index]
+      if (!id || !dataUrl) continue
+      await storeImageWithId(id, dataUrl, 'generated')
+      cacheImage(id, dataUrl)
+    }
+    scheduleThumbnailBackfill(outputIds, 'background')
+  })().catch((err) => {
+    console.warn('Failed to persist generated images', { taskId, err })
+  })
+}
+
 export function getCodexCliPromptKey(settings: AppSettings): string {
   const profile = getActiveApiProfile(settings)
   return `${profile.baseUrl}\n${profile.apiKey}`
@@ -923,58 +953,12 @@ function mapActualParamsByImage(outputIds: string[], paramsList: Array<Partial<T
   return mapped && Object.keys(mapped).length > 0 ? mapped : undefined
 }
 
-async function readImageSizeParam(dataUrl: string): Promise<Partial<TaskParams> | undefined> {
-  if (typeof Image === 'undefined') return undefined
-
-  return new Promise((resolve) => {
-    let settled = false
-    const image = new Image()
-    const finish = (params: Partial<TaskParams> | undefined) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolve(params)
-    }
-    const timer = setTimeout(() => finish(undefined), 2000)
-    image.onload = () => {
-      if (image.naturalWidth > 0 && image.naturalHeight > 0) {
-        finish({ size: `${image.naturalWidth}x${image.naturalHeight}` })
-      } else {
-        finish(undefined)
-      }
-    }
-    image.onerror = () => finish(undefined)
-    image.src = dataUrl
-    if (image.complete && image.naturalWidth > 0 && image.naturalHeight > 0) {
-      finish({ size: `${image.naturalWidth}x${image.naturalHeight}` })
-    }
-  })
-}
-
-async function readImageSizeParamsList(images: string[]): Promise<Array<Partial<TaskParams> | undefined>> {
-  return Promise.all(images.map((image) => readImageSizeParam(image)))
-}
-
-async function resolveImageSizeParamsList(
-  images: string[],
-  preferred?: Array<Partial<TaskParams> | undefined>,
-): Promise<Array<Partial<TaskParams> | undefined>> {
-  if (preferred?.length === images.length && preferred.every(hasActualParams)) return preferred
-  const fallback = await readImageSizeParamsList(images)
-  return images.map((_, index) => hasActualParams(preferred?.[index]) ? preferred?.[index] : fallback[index])
-}
-
 async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<ReturnType<typeof getFalQueuedImageResult>>) {
   const latest = useStore.getState().tasks.find((item) => item.id === task.id)
   if (!latest || latest.status === 'done') return
 
-  const actualParamsList = await resolveImageSizeParamsList(result.images, result.actualParamsList)
-  const outputIds: string[] = []
-  for (const dataUrl of result.images) {
-    const imgId = await storeImage(dataUrl, 'generated')
-    cacheImage(imgId, dataUrl)
-    outputIds.push(imgId)
-  }
+  const actualParamsList = result.actualParamsList?.length ? result.actualParamsList : result.images.map(() => undefined)
+  const outputIds = prepareGeneratedImageIds(result.images)
 
   updateTaskInStore(task.id, {
     outputImages: outputIds,
@@ -987,6 +971,7 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
     finishedAt: Date.now(),
     elapsed: Date.now() - task.createdAt,
   })
+  persistGeneratedImages(task.id, outputIds, result.images)
   useStore.getState().showToast(`fal.ai 任务已恢复，共 ${outputIds.length} 张图片`, 'success')
 }
 
@@ -1279,23 +1264,18 @@ async function executeTask(taskId: string) {
     const latestBeforeSuccess = useStore.getState().tasks.find((t) => t.id === taskId)
     if (!latestBeforeSuccess || latestBeforeSuccess.status !== 'running') return
 
-    // 存储输出图片
-    const outputIds: string[] = []
-    for (const dataUrl of result.images) {
-      const imgId = await storeImage(dataUrl, 'generated')
-      cacheImage(imgId, dataUrl)
-      outputIds.push(imgId)
-    }
+    const outputIds = prepareGeneratedImageIds(result.images)
+    const outputCount = Math.max(outputIds.length, result.rawImageUrls?.length ?? 0)
     const isAsyncCustomTask = taskProvider !== 'fal' && taskProvider !== 'openai' && Boolean(customTaskInfo)
     const actualParamsList = taskProvider === 'fal'
-      ? await resolveImageSizeParamsList(result.images, result.actualParamsList)
+      ? result.actualParamsList
       : isAsyncCustomTask
-      ? await readImageSizeParamsList(result.images)
+      ? result.actualParamsList
       : result.actualParamsList
     const actualParams = (() => {
       if (taskProvider === 'fal') return firstActualParams(actualParamsList)
       if (isAsyncCustomTask) return firstActualParams(actualParamsList)
-      return { ...result.actualParams, n: outputIds.length }
+      return { ...result.actualParams, n: outputCount }
     })()
     const shouldStoreRevisedPrompts = taskProvider !== 'fal' && !isAsyncCustomTask
     const actualParamsByImage = mapActualParamsByImage(outputIds, actualParamsList)
@@ -1333,7 +1313,8 @@ async function executeTask(taskId: string) {
       customRecoverable: false,
     })
 
-    useStore.getState().showToast(`生成完成，共 ${outputIds.length} 张图片`, 'success')
+    persistGeneratedImages(taskId, outputIds, result.images)
+    useStore.getState().showToast(`生成完成，共 ${outputCount} 张图片`, 'success')
     const currentMask = useStore.getState().maskDraft
     if (
       maskDataUrl &&
@@ -1666,13 +1647,8 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
   const latest = useStore.getState().tasks.find((item) => item.id === task.id)
   if (!latest || latest.status === 'done') return
 
-  const actualParamsList = await readImageSizeParamsList(result.images)
-  const outputIds: string[] = []
-  for (const dataUrl of result.images) {
-    const imgId = await storeImage(dataUrl, 'generated')
-    cacheImage(imgId, dataUrl)
-    outputIds.push(imgId)
-  }
+  const actualParamsList = result.images.map(() => undefined)
+  const outputIds = prepareGeneratedImageIds(result.images)
 
   updateTaskInStore(task.id, {
     outputImages: outputIds,
@@ -1685,6 +1661,7 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
     finishedAt: Date.now(),
     elapsed: Date.now() - task.createdAt,
   })
+  persistGeneratedImages(task.id, outputIds, result.images)
   useStore.getState().showToast(`自定义异步任务已恢复，共 ${outputIds.length} 张图片`, 'success')
 }
 
