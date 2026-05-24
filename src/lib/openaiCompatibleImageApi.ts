@@ -343,10 +343,10 @@ function parseResponsesImageResults(payload: ResponsesApiResponse, fallbackMime:
   for (const item of output) {
     if (item?.type !== 'image_generation_call') continue
 
-    const result = item.result
-    if (typeof result === 'string' && result.trim()) {
+    const b64 = getResponsesImageResultBase64(item.result)
+    if (b64) {
       results.push({
-        image: normalizeBase64Image(result, fallbackMime),
+        image: normalizeBase64Image(b64, fallbackMime),
         actualParams: mergeActualParams(pickActualParams(item)),
         revisedPrompt: typeof item.revised_prompt === 'string' ? item.revised_prompt : undefined,
       })
@@ -362,7 +362,25 @@ function parseResponsesImageResults(payload: ResponsesApiResponse, fallbackMime:
   return results
 }
 
-async function parseImagesApiResponse(payload: ImageApiResponse, mime: string, _signal?: AbortSignal): Promise<CallApiResult> {
+function getResponsesImageResultBase64(result: ResponsesOutputItem['result']): string | undefined {
+  const b64 = typeof result === 'string'
+    ? result
+    : result && typeof result === 'object'
+    ? typeof result.b64_json === 'string'
+      ? result.b64_json
+      : typeof result.base64 === 'string'
+      ? result.base64
+      : typeof result.image === 'string'
+      ? result.image
+      : typeof result.data === 'string'
+      ? result.data
+      : ''
+    : ''
+
+  return b64.trim() ? b64 : undefined
+}
+
+async function parseImagesApiResponse(payload: ImageApiResponse, mime: string, signal?: AbortSignal): Promise<CallApiResult> {
   const data = payload.data
   if (!Array.isArray(data) || !data.length) {
     const err = new Error('接口没有返回图片数据，请查看原始响应内容确认服务商实际返回的数据结构。如果使用的是中转或兼容接口，建议创建并使用「自定义服务商」配置。')
@@ -424,9 +442,11 @@ async function parseImagesApiStreamResponse(
   onPartialImage?: CallApiOptions['onPartialImage'],
 ): Promise<CallApiResult> {
   const completedItems: ImageResponseItem[] = []
+  let resultPayload: ImageApiResponse | null = null
 
   await readJsonServerSentEvents(response, (event) => {
     const type = getStringValue(event, 'type')
+    const object = getStringValue(event, 'object')
     if (type === 'image_generation.partial_image' || type === 'image_edit.partial_image') {
       const b64 = getStringValue(event, 'b64_json')
       if (b64) {
@@ -438,10 +458,19 @@ async function parseImagesApiStreamResponse(
       return
     }
 
+    if (object === 'image.generation.result' || object === 'image.edit.result') {
+      resultPayload = normalizeImageApiPayload(event)
+      return
+    }
+
     if (type === 'image_generation.completed' || type === 'image_edit.completed') {
       completedItems.push(eventToImageResponseItem(event))
     }
   })
+
+  if (resultPayload) {
+    return parseImagesApiResponse(resultPayload, mime)
+  }
 
   if (!completedItems.length) {
     throw new Error('流式接口未返回最终图片数据')
@@ -513,7 +542,14 @@ async function parseResponsesApiStreamResponse(
   const payload = completedPayload ?? (outputItems.length ? { output: outputItems } : null)
   if (!payload) throw new Error('流式接口未返回最终图片数据')
 
-  const imageResults = parseResponsesImageResults(payload, mime)
+  let imageResults: ReturnType<typeof parseResponsesImageResults>
+  try {
+    imageResults = parseResponsesImageResults(payload, mime)
+  } catch (err) {
+    const collectedImageItems = outputItems.filter((item) => getResponsesImageResultBase64(item.result))
+    if (collectedImageItems.length === 0) throw err
+    imageResults = parseResponsesImageResults({ output: collectedImageItems }, mime)
+  }
   const actualParams = mergeActualParams(imageResults[0]?.actualParams ?? {})
   return {
     images: imageResults.map((result) => result.image),
